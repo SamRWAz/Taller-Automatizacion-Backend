@@ -44,6 +44,12 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
+      - name: Wake up Render API backend (warm-up)
+        run: |
+          echo "Waking up Render backend from cold sleep..."
+          curl -s --retry 5 --retry-delay 5 --retry-connrefused --max-time 60 "https://taller-de-tecnicas-de-prueba-de-caja.onrender.com/api/ejercicios" > /dev/null || true
+          echo "Render backend is ready!"
+
       - name: Run tests (with tag support)
         id: test_execution
         continue-on-error: true
@@ -69,15 +75,15 @@ jobs:
             ./gradlew clean test --no-daemon --console=plain --stacktrace
           fi
 
-      - name: List target output (for debugging)
+      - name: List test output (for debugging)
         if: always()
         run: |
           echo "-- target dir listing --"
           ls -la target || true
           echo "-- karate reports listing --"
           ls -la target/karate-reports || true
-          echo "-- test results listing --"
-          ls -la target/test-results || true
+          echo "-- build test results listing --"
+          ls -la build/test-results || true
 
       - name: Upload Karate reports
         if: always()
@@ -91,12 +97,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: test-results
-          path: target/test-results
+          path: build/test-results/test
 
       - name: Determine test status
         if: always()
         id: test_status
         run: |
+          # Guardar el exit code del paso anterior
           exit_code=${{ steps.test_execution.outcome }}
           
           if [ "$exit_code" = "success" ]; then
@@ -133,6 +140,7 @@ jobs:
 
           echo "Updating Issue #$ISSUE_NUMBER with status: $TEST_STATUS"
 
+          # Determinar label y emoji según estado
           case "$TEST_STATUS" in
             "passed")
               STATUS_LABEL="status:passed"
@@ -148,12 +156,15 @@ jobs:
               ;;
           esac
 
+          # URLs de API
           ISSUES_API="https://api.github.com/repos/$REPO/issues/$ISSUE_NUMBER"
           LABELS_API="$ISSUES_API/labels"
 
+          # Obtener labels actuales
           echo "Fetching current labels from Issue #$ISSUE_NUMBER..."
           CURRENT_LABELS=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$ISSUES_API" | jq -r '.labels[].name')
 
+          # Remover labels anteriores de estado (status:*)
           for label in $CURRENT_LABELS; do
             if [[ $label == status:* ]]; then
               echo "  Removing label: $label"
@@ -164,6 +175,7 @@ jobs:
             fi
           done
 
+          # Agregar nuevo label
           echo "Adding new label: $STATUS_LABEL"
           curl -s -X POST \
             -H "Authorization: token $GITHUB_TOKEN" \
@@ -172,6 +184,7 @@ jobs:
             -d "[\"$STATUS_LABEL\"]" \
             -o /dev/null
 
+          # Agregar comentario
           TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
           COMMENT_BODY="$STATUS_EMOJI **Test Execution Report** ($TIMESTAMP)
 
