@@ -1,0 +1,38 @@
+plugins {
+    id 'java'
+}
+
+group = 'com.cajanegra2'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+ext {
+    karateVersion = '1.4.1'
+}
+
+dependencies {
+    testImplementation "com.intuit.karate:karate-junit5:${karateVersion}"
+    testImplementation "ch.qos.logback:logback-classic:1.5.6"
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+test {
+    useJUnitPlatform()
+    // Mantiene soporte para pasar propiedades del sistema desde CLI
+    systemProperty "karate.options", System.getProperty("karate.options")
+    systemProperty "networkaddress.cache.negative.ttl", "0"
+    systemProperty "networkaddress.cache.ttl", "30"
+}
+
+clean {
+    delete 'target'
+}
