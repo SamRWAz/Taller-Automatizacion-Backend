@@ -8,17 +8,51 @@ on:
   workflow_dispatch:
     inputs:
       testTag:
-        description: 'Tag de Karate a ejecutar (puede incluir o no @). Si se deja vacío en ejecución manual, se usará @smoketest en integración.'
+        description: 'Tag de Karate a evaluar individualmente (ej: @Issue-1) o deja "all" para evaluar todas una por una'
         required: false
-        default: ''
+        default: 'all'
 
 permissions:
   contents: read
   issues: write
 
 jobs:
-  build:
+  setup:
+    name: Preparar Matriz de Pruebas
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Despertar backend de Render (Warm-up)
+        run: |
+          echo "Waking up Render backend from cold sleep..."
+          curl -s --retry 5 --retry-delay 5 --retry-connrefused --max-time 60 "https://taller-de-tecnicas-de-prueba-de-caja.onrender.com/api/ejercicios" > /dev/null || true
+          echo "Render backend is ready!"
+
+      - name: Determinar pruebas a evaluar
+        id: set-matrix
+        run: |
+          input_tag="${{ github.event.inputs.testTag }}"
+          if [ -n "$input_tag" ] && [ "$input_tag" != "all" ]; then
+            if [ "${input_tag#@}" = "$input_tag" ]; then
+              input_tag="@$input_tag"
+            fi
+            echo "Ejecutando prueba individual: $input_tag"
+            echo "matrix=[\"$input_tag\"]" >> $GITHUB_OUTPUT
+          else
+            echo "Ejecutando todas las pruebas individualmente por matriz..."
+            echo 'matrix=["@Issue-1","@Issue-2","@Issue-3","@Issue-4","@Issue-5","@Issue-6","@Issue-7","@Issue-8","@Issue-9","@Issue-10","@Issue-11","@Issue-12","@Issue-13","@Issue-14","@Issue-15","@Issue-16"]' >> $GITHUB_OUTPUT
+          fi
+
+  test:
+    name: "Prueba ${{ matrix.tag }}"
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        tag: ${{ fromJson(needs.setup.outputs.matrix) }}
     env:
       JAVA_VERSION: '21'
     steps:
@@ -44,68 +78,27 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      - name: Wake up Render API backend (warm-up)
-        run: |
-          echo "Waking up Render backend from cold sleep..."
-          curl -s --retry 5 --retry-delay 5 --retry-connrefused --max-time 60 "https://taller-de-tecnicas-de-prueba-de-caja.onrender.com/api/ejercicios" > /dev/null || true
-          echo "Render backend is ready!"
-
-      - name: Run tests (with tag support)
+      - name: Run test ${{ matrix.tag }}
         id: test_execution
         continue-on-error: true
         run: |
-          # Determine tag: use workflow_dispatch input when present, otherwise default to @smoketest for CI events
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            tag='${{ github.event.inputs.testTag }}'
-          else
-            tag='@smoketest'
-          fi
-
-          # normalize: if tag is not empty and doesn't start with @, prepend it
-          if [ -n "$tag" ] && [ "${tag#@}" = "$tag" ]; then
-            tag="@$tag"
-          fi
-
-          echo "Using Karate tag: '$tag'"
-          echo "tag=$tag" >> $GITHUB_ENV
-
-          if [ -n "$tag" ]; then
-            ./gradlew clean test --no-daemon --console=plain --stacktrace -Dkarate.options="--tags $tag"
-          else
-            ./gradlew clean test --no-daemon --console=plain --stacktrace
-          fi
-
-      - name: List test output (for debugging)
-        if: always()
-        run: |
-          echo "-- target dir listing --"
-          ls -la target || true
-          echo "-- karate reports listing --"
-          ls -la target/karate-reports || true
-          echo "-- build test results listing --"
-          ls -la build/test-results || true
+          tag='${{ matrix.tag }}'
+          echo "Ejecutando individualmente el escenario con tag: '$tag'"
+          ./gradlew clean test --no-daemon --console=plain --stacktrace -Dkarate.options="--tags $tag"
 
       - name: Upload Karate reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: karate-reports
+          name: karate-reports-${{ matrix.tag }}
           path: target/karate-reports
-
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results
-          path: build/test-results/test
+          retention-days: 7
 
       - name: Determine test status
         if: always()
         id: test_status
         run: |
-          # Guardar el exit code del paso anterior
           exit_code=${{ steps.test_execution.outcome }}
-          
           if [ "$exit_code" = "success" ]; then
             echo "status=passed" >> $GITHUB_OUTPUT
             echo "TEST_RESULT=passed" >> $GITHUB_ENV
@@ -115,11 +108,10 @@ jobs:
           fi
 
       - name: Extract issue number from tag
-        if: always() && github.event_name == 'workflow_dispatch'
+        if: always()
         id: issue_info
         run: |
-          tag="${{ env.tag }}"
-          # Extraer Issue-X del tag (ej: @Issue-2 → 2)
+          tag="${{ matrix.tag }}"
           if [[ $tag =~ Issue-([0-9]+) ]]; then
             issue_number="${BASH_REMATCH[1]}"
             echo "issue_number=$issue_number" >> $GITHUB_OUTPUT
@@ -130,7 +122,7 @@ jobs:
           fi
 
       - name: Update GitHub Issue with test results
-        if: always() && github.event_name == 'workflow_dispatch' && steps.issue_info.outputs.issue_number != ''
+        if: always() && steps.issue_info.outputs.issue_number != ''
         run: |
           ISSUE_NUMBER="${{ steps.issue_info.outputs.issue_number }}"
           TEST_STATUS="${{ steps.test_status.outputs.status }}"
@@ -140,7 +132,6 @@ jobs:
 
           echo "Updating Issue #$ISSUE_NUMBER with status: $TEST_STATUS"
 
-          # Determinar label y emoji según estado
           case "$TEST_STATUS" in
             "passed")
               STATUS_LABEL="status:passed"
@@ -156,15 +147,12 @@ jobs:
               ;;
           esac
 
-          # URLs de API
           ISSUES_API="https://api.github.com/repos/$REPO/issues/$ISSUE_NUMBER"
           LABELS_API="$ISSUES_API/labels"
 
-          # Obtener labels actuales
           echo "Fetching current labels from Issue #$ISSUE_NUMBER..."
           CURRENT_LABELS=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$ISSUES_API" | jq -r '.labels[].name')
 
-          # Remover labels anteriores de estado (status:*)
           for label in $CURRENT_LABELS; do
             if [[ $label == status:* ]]; then
               echo "  Removing label: $label"
@@ -175,7 +163,6 @@ jobs:
             fi
           done
 
-          # Agregar nuevo label
           echo "Adding new label: $STATUS_LABEL"
           curl -s -X POST \
             -H "Authorization: token $GITHUB_TOKEN" \
@@ -184,15 +171,15 @@ jobs:
             -d "[\"$STATUS_LABEL\"]" \
             -o /dev/null
 
-          # Agregar comentario
           TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
           COMMENT_BODY="$STATUS_EMOJI **Test Execution Report** ($TIMESTAMP)
 
-          - **Status**: $TEST_STATUS
+          - **Tag Evaluado**: \`${{ matrix.tag }}\`
+          - **Status**: \`$TEST_STATUS\`
           - **Run**: [$RUN_URL]($RUN_URL)
           - **Timestamp**: $TIMESTAMP
 
-          *Updated automatically by GitHub Actions*"
+          *Updated automatically by GitHub Actions Matrix*"
 
           echo "Adding comment to Issue #$ISSUE_NUMBER..."
           curl -s -X POST \
@@ -203,11 +190,9 @@ jobs:
             -o /dev/null
 
           echo "✅ Issue #$ISSUE_NUMBER updated successfully!"
-          echo "  Label: $STATUS_LABEL"
-          echo "  Comment: Added"
 
-      - name: Fail workflow if tests failed
+      - name: Fail workflow if test failed
         if: always() && env.TEST_RESULT == 'failed'
         run: |
-          echo "❌ Tests failed during execution!"
+          echo "❌ Test ${{ matrix.tag }} failed during execution!"
           exit 1
