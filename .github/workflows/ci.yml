@@ -182,11 +182,13 @@ jobs:
           *Updated automatically by GitHub Actions Matrix*"
 
           echo "Adding comment to Issue #$ISSUE_NUMBER..."
+          PAYLOAD=$(jq -n --arg b "$COMMENT_BODY" '{body: $b}')
           curl -s -X POST \
             -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
             -H "Content-Type: application/json" \
             "$ISSUES_API/comments" \
-            -d "{\"body\": $(echo "$COMMENT_BODY" | jq -R .)}" \
+            -d "$PAYLOAD" \
             -o /dev/null
 
           echo "✅ Issue #$ISSUE_NUMBER updated successfully!"
